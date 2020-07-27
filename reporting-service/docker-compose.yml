@@ -24,10 +24,20 @@ services:
     container_name: postgres
     volumes:
       - "pgdata-volume:/var/lib/postgresql/data"
-      - "./database/:/docker-entrypoint-initdb.d"
+      - "./database/reporting/:/docker-entrypoint-initdb.d"
     environment:
-      - "POSTGRES_USER=${POSTGRES_USER}"
-      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=changeit"
+    restart: always
+  iam-db:
+    image: "qaprosoft/postgres:${TAG_POSTGRES}"
+    container_name: iam-db
+    volumes:
+      - "iam-db-volume:/var/lib/postgresql/data"
+      - "./database/iam/:/docker-entrypoint-initdb.d"
+    environment:
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=changeit"
     restart: always
   rabbitmq:
     image: "qaprosoft/rabbitmq:${TAG_RABBITMQ}"
@@ -67,7 +77,9 @@ services:
     volumes:
       - "./configuration/logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro"
       - "./configuration/logstash/mapping.json:/mapping.json:ro"
+      - "./configuration/logstash/test-run-data-template.json:/test-run-data-template.json:ro"
     depends_on:
+      - rabbitmq
       - elasticsearch
     restart: always
   reporting-service:
@@ -77,21 +89,95 @@ services:
       - "assets-data:/opt/assets"
     env_file:
       - variables.env
+      - configuration/_common/rabbitmq.env
+      - configuration/_common/s3.env
+      - configuration/_common/secrets.env
     environment:
-      - "DATABASE_USERNAME=${POSTGRES_USER}"
-      - "DATABASE_PASSWORD=${POSTGRES_PASSWORD}"
+      - "DATABASE_USERNAME=postgres"
+      - "DATABASE_PASSWORD=changeit"
       - "WEB_HOST=http://${INFRA_HOST}"
       - "API_HOST=http://${INFRA_HOST}"
       - "ELASTICSEARCH_URL=http://${INFRA_HOST}/elasticsearch"
       - "GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}"
       - "GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}"
+      - "GITHUB_HOST=${GITHUB_HOST}"
       - "AUTH_TOKEN_SECRET=${AUTH_TOKEN_SECRET}"
       - "CRYPTO_SALT=${CRYPTO_SALT}"
     depends_on:
       - postgres
       - rabbitmq
       - redis
+      - minio
     restart: always
+  iam-service:
+    image: "zebrunner/iam-service:${TAG_IAM_SERVICE}"
+    container_name: iam-service
+    env_file:
+      - configuration/iam-service/variables.env
+      - configuration/_common/secrets.env
+      - configuration/_common/rabbitmq.env
+    depends_on:
+      - iam-db
+    restart: always
+  db-migration-tool:
+    image: "siarheibranko/data-migration-tool"
+    container_name: db-migration-tool
+    volumes:
+      - "./configuration/migration/:/var/migration"
+      - "migration-state-volume:/var/migration-state"
+    depends_on:
+      - postgres
+      - iam-db
+    restart: "no"
+  artifacts-proxy-service:
+    image: "zebrunner/artifacts-proxy-service:${TAG_ARTIFACTS_PROXY_SERVICE}"
+    container_name: artifacts-proxy-service
+    env_file:
+      - configuration/artifacts-proxy-service/variables.env
+      - configuration/_common/rabbitmq.env
+      - configuration/_common/s3.env
+    depends_on:
+      - rabbitmq
+    restart: always
+  mail-service:
+    image: "zebrunner/mail-service:${TAG_MAIL_SERVICE}"
+    container_name: mail-service
+    env_file:
+      - configuration/mail-service/variables.env
+      - configuration/_common/rabbitmq.env
+      - configuration/_common/s3.env
+    depends_on:
+      - postgres
+      - rabbitmq
+      - minio
+    restart: always
+
+  minio:
+    image: "minio/minio:${TAG_MINIO}"
+    container_name: minio
+    volumes:
+      - "miniodata-volume:/data"
+    command: server /data
+    environment:
+      - MINIO_ACCESS_KEY=changeit
+      - MINIO_SECRET_KEY=changeit
+    restart: always
+
+  minio-mc:
+    image: "minio/mc:${TAG_MINIO_MC}"
+    container_name: minio-mc
+    depends_on:
+      - minio
+    volumes:
+      - "./configuration/minio/data:/zebrunner:ro"
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add minio-host http://minio:9000 changeit changeit --api s3v4;
+      /usr/bin/mc mb --ignore-existing minio-host/zebrunner;
+      /usr/bin/mc policy set download minio-host/zebrunner;
+      /usr/bin/mc mirror -w --overwrite zebrunner minio-host/zebrunner;
+      exit 0;
+      "
   reporting-ui:
     image: "zebrunner/reporting-ui:${TAG_REPORTING_UI}"
     container_name: reporting-ui
@@ -106,5 +192,8 @@ services:
     restart: always
 volumes:
   pgdata-volume:
+  iam-db-volume:
   esdata-volume:
   assets-data:
+  miniodata-volume:
+  migration-state-volume:

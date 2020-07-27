@@ -1,6 +1,7 @@
 .env
 nginx/conf.d/default.conf
 selenoid/browsers.json
+selenoid/bin/cm
 .env.bak
 nginx/conf.d/default.conf.bak
 variables.env.bak
